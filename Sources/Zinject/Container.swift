@@ -2,7 +2,11 @@ public final class Container: @unchecked Sendable, Resolver {
     @Atomic private var serviceFactories: [ServiceKey: any ServiceFactory] = [:]
     @Atomic private var services: [ServiceKey: Any] = [:]
 
-    public init() {}
+    public let defaultScope: Scope
+
+    public init(defaultScope: Scope = .container) {
+        self.defaultScope = defaultScope
+    }
 
     @discardableResult
     public func register<Service>(
@@ -22,7 +26,10 @@ public final class Container: @unchecked Sendable, Resolver {
             return service as? Service
         } else if let serviceFactory = serviceFactories[serviceKey] {
             if let service = serviceFactory.create(resolver: self) as? Service {
-                services[serviceKey] = service
+                let scope = serviceFactory.scope ?? defaultScope
+                if scope == .container {
+                    services[serviceKey] = service
+                }
                 return service
             }
             return nil

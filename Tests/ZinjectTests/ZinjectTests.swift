@@ -63,3 +63,43 @@ final class C {
     let a = container.resolve(A.self)
     #expect(a?.num == 2)
 }
+
+@Test func containerScopeContainerDefault() async throws {
+    let container = Container(defaultScope: .container)
+    container.register(A.self) { _ in A() }
+
+    let a1 = container.resolve(A.self)
+    let a2 = container.resolve(A.self)
+
+    #expect(a1 === a2)
+}
+
+@Test func containerScopeOnServiceEntry() async throws {
+    let container = Container()
+    container.register(A.self) { _ in A() }.scope(.container)
+
+    let a1 = container.resolve(A.self)
+    let a2 = container.resolve(A.self)
+
+    #expect(a1 === a2)
+}
+
+@Test func transientScopeContainerDefault() async throws {
+    let container = Container(defaultScope: .transient)
+    container.register(A.self) { _ in A() }
+
+    let a1 = container.resolve(A.self)
+    let a2 = container.resolve(A.self)
+
+    #expect(a1 !== a2)
+}
+
+@Test func transientScopeOnServiceEntry() async throws {
+    let container = Container()
+    container.register(A.self) { _ in A() }.scope(.transient)
+
+    let a1 = container.resolve(A.self)
+    let a2 = container.resolve(A.self)
+
+    #expect(a1 !== a2)
+}
