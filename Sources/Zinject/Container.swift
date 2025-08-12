@@ -19,6 +19,17 @@ public final class Container: @unchecked Sendable, Resolver {
         return serviceFactory
     }
 
+    @discardableResult
+    public func register<Service>(
+        _ type: Service.Type,
+        factory: @MainActor @escaping (Resolver) -> Service
+    ) -> any ServiceEntry<Service> {
+        let serviceFactory = ServiceFactoryImpl<Service>(factory: factory)
+        let serviceKey = ServiceKey(resolvingType: type)
+        serviceFactories[serviceKey] = serviceFactory
+        return serviceFactory
+    }
+
     public func resolve<Service>(_ type: Service.Type) -> Service? {
         let serviceKey = ServiceKey(resolvingType: type)
 
