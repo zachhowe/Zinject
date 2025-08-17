@@ -21,6 +21,22 @@ final class C {
     }
 }
 
+final class SendableA: @unchecked Sendable {
+    @Atomic var num: Int
+
+    init(num: Int = 1) {
+        self.num = num
+    }
+}
+
+final class SendableB: Sendable {
+    let a: SendableA
+
+    init(a: SendableA) {
+        self.a = a
+    }
+}
+
 @Test func resolveEmptyContainer() async throws {
     let container = Container()
     let service = container.resolve(String.self)
@@ -102,4 +118,90 @@ final class C {
     let a2 = container.resolve(A.self)
 
     #expect(a1 !== a2)
+}
+
+@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+@Test func registerMainActorBasic() async throws {
+    let container = Container()
+    container.registerMainActor(String.self) { _ in "main actor hello" }
+
+    let string = container.resolve(String.self)
+    #expect(string == "main actor hello")
+}
+
+@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+@Test func registerMainActorCustomType() async throws {
+    let container = Container()
+    container.registerMainActor(SendableA.self) { _ in SendableA() }
+
+    let a = container.resolve(SendableA.self)
+    #expect(a?.num == 1)
+}
+
+@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+@Test func mainActorContainerScopeDefault() async throws {
+    let container = Container(defaultScope: .container)
+    container.registerMainActor(SendableA.self) { _ in SendableA() }
+
+    let a1 = container.resolve(SendableA.self)
+    let a2 = container.resolve(SendableA.self)
+
+    #expect(a1 === a2)
+}
+
+@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+@Test func mainActorContainerScopeOnServiceEntry() async throws {
+    let container = Container()
+    container.registerMainActor(SendableA.self) { _ in SendableA() }.scope(.container)
+
+    let a1 = container.resolve(SendableA.self)
+    let a2 = container.resolve(SendableA.self)
+
+    #expect(a1 === a2)
+}
+
+@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+@Test func mainActorTransientScopeDefault() async throws {
+    let container = Container(defaultScope: .transient)
+    container.registerMainActor(SendableA.self) { _ in SendableA() }
+
+    let a1 = container.resolve(SendableA.self)
+    let a2 = container.resolve(SendableA.self)
+
+    #expect(a1 !== a2)
+}
+
+@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+@Test func mainActorTransientScopeOnServiceEntry() async throws {
+    let container = Container()
+    container.registerMainActor(SendableA.self) { _ in SendableA() }.scope(.transient)
+
+    let a1 = container.resolve(SendableA.self)
+    let a2 = container.resolve(SendableA.self)
+
+    #expect(a1 !== a2)
+}
+
+@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+@Test func mainActorInitCompleted() async throws {
+    let container = Container()
+    container.registerMainActor(SendableA.self) { _ in SendableA(num: 1) }.initCompleted { resolver, a in
+        // initCompleted callback is executed, we can verify by checking the resolved instance
+        a.num = 5
+    }
+
+    let a = container.resolve(SendableA.self)
+    #expect(a?.num == 5)
+}
+
+@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+@Test func mainActorRecursiveDependency() async throws {
+    let container = Container()
+    container.registerMainActor(SendableA.self) { _ in SendableA() }
+    container.registerMainActor(SendableB.self) { resolver in 
+        SendableB(a: resolver.resolve(SendableA.self)!) 
+    }
+
+    let b = container.resolve(SendableB.self)
+    #expect(b?.a.num == 1)
 }

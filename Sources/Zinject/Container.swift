@@ -19,12 +19,13 @@ public final class Container: @unchecked Sendable, Resolver {
         return serviceFactory
     }
 
+    @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
     @discardableResult
-    public func register<Service>(
+    public func registerMainActor<Service>(
         _ type: Service.Type,
         factory: @MainActor @escaping (Resolver) -> Service
-    ) -> any ServiceEntry<Service> {
-        let serviceFactory = ServiceFactoryImpl<Service>(factory: factory)
+    ) -> any ServiceEntry<Service> where Service: Sendable {
+        let serviceFactory = MainActorServiceFactoryImpl<Service>(factory: factory)
         let serviceKey = ServiceKey(resolvingType: type)
         serviceFactories[serviceKey] = serviceFactory
         return serviceFactory
