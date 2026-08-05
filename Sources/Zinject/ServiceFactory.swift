@@ -1,29 +1,37 @@
+import Foundation
+
 protocol ServiceFactory<Service>: Sendable {
     associatedtype Service
 
     var scope: Scope? { get }
     func create(resolver: Resolver) -> Service
+    func runInitCompleted(resolver: Resolver, instance: Any)
 }
 
 final class ServiceFactoryImpl<Service>: @unchecked Sendable, ServiceFactory, ServiceEntry {
     let factory: @Sendable (Resolver) -> Service
 
     @Atomic internal var scope: Scope?
-    @Atomic internal var initCompletedFunc: (@Sendable (Resolver, Service) -> Void)?
+    @Atomic internal var initCompletedFuncs: [@Sendable (Resolver, Service) -> Void] = []
 
     init(factory: @Sendable @escaping (Resolver) -> Service) {
         self.factory = factory
     }
 
     func create(resolver: Resolver) -> Service {
-        let newObj = factory(resolver)
-        initCompletedFunc?(resolver, newObj)
-        return newObj
+        factory(resolver)
+    }
+
+    func runInitCompleted(resolver: Resolver, instance: Any) {
+        guard let service = instance as? Service else { return }
+        for callback in initCompletedFuncs {
+            callback(resolver, service)
+        }
     }
 
     @discardableResult
     func initCompleted(_ perform: @Sendable @escaping (Resolver, Service) -> Void) -> any ServiceEntry<Service> {
-        initCompletedFunc = perform
+        initCompletedFuncs.append(perform)
         return self
     }
 
@@ -34,28 +42,40 @@ final class ServiceFactoryImpl<Service>: @unchecked Sendable, ServiceFactory, Se
     }
 }
 
-@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
 final class MainActorServiceFactoryImpl<Service>: @unchecked Sendable, ServiceFactory, ServiceEntry where Service: Sendable {
     let factory: @MainActor (Resolver) -> Service
 
     @Atomic internal var scope: Scope?
-    @Atomic internal var initCompletedFunc: (@Sendable (Resolver, Service) -> Void)?
+    @Atomic internal var initCompletedFuncs: [@Sendable (Resolver, Service) -> Void] = []
 
     init(factory: @MainActor @escaping (Resolver) -> Service) {
         self.factory = factory
     }
 
     func create(resolver: Resolver) -> Service {
-        let newObj = MainActor.assumeIsolated {
-            factory(resolver)
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                factory(resolver)
+            }
+        } else {
+            DispatchQueue.main.sync {
+                MainActor.assumeIsolated {
+                    factory(resolver)
+                }
+            }
         }
-        initCompletedFunc?(resolver, newObj)
-        return newObj
+    }
+
+    func runInitCompleted(resolver: Resolver, instance: Any) {
+        guard let service = instance as? Service else { return }
+        for callback in initCompletedFuncs {
+            callback(resolver, service)
+        }
     }
 
     @discardableResult
     func initCompleted(_ perform: @Sendable @escaping (Resolver, Service) -> Void) -> any ServiceEntry<Service> {
-        initCompletedFunc = perform
+        initCompletedFuncs.append(perform)
         return self
     }
 
