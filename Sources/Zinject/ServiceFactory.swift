@@ -1,14 +1,16 @@
 import Foundation
 
-/// `AnyObject` is load-bearing: `Container.construct` compares the factory it
-/// ran against the one currently registered, by identity, before caching.
+/// Class-constrained so the container can compare registrations by identity
+/// and tell "the factory I started with" from "a factory registered since".
+@usableFromInline
 protocol ServiceFactory<Service>: AnyObject, Sendable {
     associatedtype Service
 
     var scope: Scope? { get }
 
-    /// Whether `create` must be called from the main thread. Lets
-    /// `Container.resolveAsync` hop only for the registrations that need it.
+    /// Whether ``create(resolver:)`` must be called from the main thread. Lets
+    /// ``Container/resolveAsync(_:)`` hop only for the registrations that need
+    /// it, and leave every other resolve on the thread that asked for it.
     var requiresMainActor: Bool { get }
 
     func create(resolver: Resolver) -> Service

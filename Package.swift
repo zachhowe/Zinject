@@ -17,13 +17,24 @@ let package = Package(
             name: "Zinject",
             targets: ["Zinject"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-atomics.git", from: "1.2.0"),
+    ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
         // Targets can depend on other targets in this package and products from dependencies.
         .target(
-            name: "Zinject"),
+            name: "Zinject",
+            dependencies: [
+                .product(name: "Atomics", package: "swift-atomics"),
+            ]
+        ),
         .testTarget(
             name: "ZinjectTests",
+            dependencies: ["Zinject"]
+        ),
+        .executableTarget(
+            name: "ZinjectBench",
             dependencies: ["Zinject"]
         ),
     ]
