@@ -1,9 +1,16 @@
 import Foundation
 
-protocol ServiceFactory<Service>: Sendable {
+/// `AnyObject` is load-bearing: `Container.construct` compares the factory it
+/// ran against the one currently registered, by identity, before caching.
+protocol ServiceFactory<Service>: AnyObject, Sendable {
     associatedtype Service
 
     var scope: Scope? { get }
+
+    /// Whether `create` must be called from the main thread. Lets
+    /// `Container.resolveAsync` hop only for the registrations that need it.
+    var requiresMainActor: Bool { get }
+
     func create(resolver: Resolver) -> Service
     func runInitCompleted(resolver: Resolver, instance: Any)
 }
@@ -13,6 +20,8 @@ final class ServiceFactoryImpl<Service>: @unchecked Sendable, ServiceFactory, Se
 
     @Atomic internal var scope: Scope?
     @Atomic internal var initCompletedFuncs: [@Sendable (Resolver, Service) -> Void] = []
+
+    let requiresMainActor = false
 
     init(factory: @Sendable @escaping (Resolver) -> Service) {
         self.factory = factory
@@ -48,21 +57,36 @@ final class MainActorServiceFactoryImpl<Service>: @unchecked Sendable, ServiceFa
     @Atomic internal var scope: Scope?
     @Atomic internal var initCompletedFuncs: [@Sendable (Resolver, Service) -> Void] = []
 
+    let requiresMainActor = true
+
     init(factory: @MainActor @escaping (Resolver) -> Service) {
         self.factory = factory
     }
 
     func create(resolver: Resolver) -> Service {
-        if Thread.isMainThread {
-            MainActor.assumeIsolated {
-                factory(resolver)
-            }
-        } else {
-            DispatchQueue.main.sync {
-                MainActor.assumeIsolated {
-                    factory(resolver)
-                }
-            }
+        // This used to hop via `DispatchQueue.main.sync`, and that was a bug.
+        //
+        // A synchronous hop deadlocks whenever the main thread is already
+        // waiting on the caller — and because it only runs on a cache miss, it
+        // stops reproducing the moment anything warms the type. A hang that
+        // vanishes on the second launch and never reproduces under a debugger
+        // you have already used the app in is worse than a crash, so this
+        // refuses instead.
+        //
+        // `Container.resolveAsync(_:)` is the supported way in from a
+        // background context: it hops with `await`, which cannot deadlock.
+        guard Thread.isMainThread else {
+            preconditionFailure("""
+                Zinject: \(Service.self) was registered with `registerMainActor` and \
+                resolved for the first time off the main thread. Zinject will not hop \
+                synchronously — that deadlocks whenever the main thread is waiting on \
+                the caller, and it only happens on a cache miss, so it would not \
+                reproduce. Resolve it from the main actor, or `await \
+                container.resolveAsync(_:)`.
+                """)
+        }
+        return MainActor.assumeIsolated {
+            factory(resolver)
         }
     }
 

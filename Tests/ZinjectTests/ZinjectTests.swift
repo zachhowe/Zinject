@@ -222,7 +222,11 @@ final class Counter: @unchecked Sendable {
 
     for _ in 0..<100 {
         let container = Container(defaultScope: .container)
-        container.register(A.self) { _ in A() }
+        let factoryCalls = Counter()
+        container.register(A.self) { _ in
+            _ = factoryCalls.incrementAndGet()
+            return A()
+        }
 
         let results = Results()
         DispatchQueue.concurrentPerform(iterations: 8) { _ in
@@ -235,10 +239,18 @@ final class Counter: @unchecked Sendable {
         #expect(all.count == 8)
         let first = all.first
         #expect(all.allSatisfy { $0 === first })
+        // Unparked stress version of `concurrentFirstResolveConstructsExactlyOnce`:
+        // 100 rounds of a genuine 8-way race, none of which may build twice.
+        #expect(factoryCalls.current == 1)
     }
 }
 
-@Test func registerMainActorBasic() async throws {
+// These suites resolve `registerMainActor` registrations, so they are pinned to
+// the main actor. That used to be optional: the container hopped via
+// `DispatchQueue.main.sync` for you. It no longer does — see
+// `mainActorSyncResolveOffMainTraps` for why.
+
+@Test @MainActor func registerMainActorBasic() async throws {
     let container = Container()
     container.registerMainActor(String.self) { _ in "main actor hello" }
 
@@ -246,7 +258,7 @@ final class Counter: @unchecked Sendable {
     #expect(string == "main actor hello")
 }
 
-@Test func registerMainActorCustomType() async throws {
+@Test @MainActor func registerMainActorCustomType() async throws {
     let container = Container()
     container.registerMainActor(SendableA.self) { _ in SendableA() }
 
@@ -254,19 +266,64 @@ final class Counter: @unchecked Sendable {
     #expect(a?.num == 1)
 }
 
-@Test func mainActorResolveFromBackgroundThread() async throws {
+// The synchronous hop is gone. It deadlocked whenever the main thread was
+// waiting on the caller, and because it only ran on a cache miss it stopped
+// reproducing as soon as anything warmed the type.
+@Test func mainActorSyncResolveOffMainTraps() async throws {
+    await #expect(processExitsWith: .failure) {
+        let container = Container()
+        container.registerMainActor(SendableA.self) { _ in SendableA() }
+
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().async {
+                _ = container.resolve(SendableA.self)
+                continuation.resume()
+            }
+        }
+    }
+}
+
+// ...and `resolveAsync` is what replaces it. It hops with `await`, which cannot
+// deadlock.
+@Test func resolveAsyncFromBackgroundRunsFactoryOnMain() async throws {
     let container = Container()
     container.registerMainActor(SendableA.self) { _ in
         #expect(Thread.isMainThread)
         return SendableA()
     }
 
-    let a = await withCheckedContinuation { (continuation: CheckedContinuation<SendableA?, Never>) in
-        DispatchQueue.global().async {
-            continuation.resume(returning: container.resolve(SendableA.self))
-        }
-    }
+    let a = await Task.detached { await container.resolveAsync(SendableA.self) }.value
     #expect(a?.num == 1)
+}
+
+@Test func resolveAsyncOnPlainRegistrationDoesNotNeedMain() async throws {
+    let container = Container()
+    container.register(SendableA.self) { _ in SendableA(num: 7) }
+
+    let a = await Task.detached { await container.resolveAsync(SendableA.self) }.value
+    #expect(a?.num == 7)
+}
+
+@Test func resolveAsyncUnregisteredReturnsNil() async throws {
+    let container = Container()
+    #expect(await container.resolveAsync(SendableA.self) == nil)
+}
+
+// A warm main-actor service is readable from anywhere without a hop: the cache
+// is checked before the plan decides it needs the main actor.
+@Test @MainActor func resolveAsyncReturnsCachedWithoutHopping() async throws {
+    let container = Container(defaultScope: .container)
+    let factoryCalls = Counter()
+    container.registerMainActor(SendableA.self) { _ in
+        _ = factoryCalls.incrementAndGet()
+        return SendableA()
+    }
+
+    let warm = container.resolve(SendableA.self)
+    let fromBackground = await Task.detached { await container.resolveAsync(SendableA.self) }.value
+
+    #expect(fromBackground === warm)
+    #expect(factoryCalls.current == 1)
 }
 
 @Test @MainActor func mainActorResolveOnMainThread() async throws {
@@ -280,7 +337,7 @@ final class Counter: @unchecked Sendable {
     #expect(a?.num == 1)
 }
 
-@Test func mainActorContainerScopeDefault() async throws {
+@Test @MainActor func mainActorContainerScopeDefault() async throws {
     let container = Container(defaultScope: .container)
     container.registerMainActor(SendableA.self) { _ in SendableA() }
 
@@ -290,7 +347,7 @@ final class Counter: @unchecked Sendable {
     #expect(a1 === a2)
 }
 
-@Test func mainActorContainerScopeOnServiceEntry() async throws {
+@Test @MainActor func mainActorContainerScopeOnServiceEntry() async throws {
     let container = Container()
     container.registerMainActor(SendableA.self) { _ in SendableA() }.scope(.container)
 
@@ -300,7 +357,7 @@ final class Counter: @unchecked Sendable {
     #expect(a1 === a2)
 }
 
-@Test func mainActorTransientScopeDefault() async throws {
+@Test @MainActor func mainActorTransientScopeDefault() async throws {
     let container = Container(defaultScope: .transient)
     container.registerMainActor(SendableA.self) { _ in SendableA() }
 
@@ -310,7 +367,7 @@ final class Counter: @unchecked Sendable {
     #expect(a1 !== a2)
 }
 
-@Test func mainActorTransientScopeOnServiceEntry() async throws {
+@Test @MainActor func mainActorTransientScopeOnServiceEntry() async throws {
     let container = Container()
     container.registerMainActor(SendableA.self) { _ in SendableA() }.scope(.transient)
 
@@ -320,7 +377,7 @@ final class Counter: @unchecked Sendable {
     #expect(a1 !== a2)
 }
 
-@Test func mainActorInitCompleted() async throws {
+@Test @MainActor func mainActorInitCompleted() async throws {
     let container = Container()
     container.registerMainActor(SendableA.self) { _ in SendableA(num: 1) }.initCompleted { resolver, a in
         // initCompleted callback is executed, we can verify by checking the resolved instance
@@ -331,7 +388,7 @@ final class Counter: @unchecked Sendable {
     #expect(a?.num == 5)
 }
 
-@Test func mainActorRecursiveDependency() async throws {
+@Test @MainActor func mainActorRecursiveDependency() async throws {
     let container = Container()
     container.registerMainActor(SendableA.self) { _ in SendableA() }
     container.registerMainActor(SendableB.self) { resolver in
@@ -357,28 +414,21 @@ final class Counter: @unchecked Sendable {
 
 // MARK: - Concurrency
 
-// Deterministically exercises the double-check in Container.resolve: the loser
-// of a concurrent first resolve discards its instance, returns the winner's
-// cached instance, and its initCompleted callbacks never run.
-@Test func raceLoserDiscardsInstanceAndSkipsInitCompleted() async throws {
-    final class Box: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value: SendableA?
-
-        func set(_ a: SendableA?) {
-            lock.lock()
-            value = a
-            lock.unlock()
-        }
-
-        var get: SendableA? {
-            lock.lock()
-            defer { lock.unlock() }
-            return value
-        }
-    }
-
-    final class InitRecords: @unchecked Sendable {
+// The guarantee this container exists to make: a `.container`-scoped service is
+// constructed EXACTLY ONCE, however many threads race its first resolve.
+//
+// This test used to assert the opposite — `factoryCalls.current == 2` — because
+// the container released its lock before running the factory and let every
+// racing thread run a copy, keeping one and discarding the rest. For a service
+// that owns a keychain handle, a CloudKit container or a crypto key, building a
+// second one and throwing it away is not a wasted allocation, it is a
+// correctness bug.
+//
+// The winner is parked inside its factory so the other threads are guaranteed to
+// arrive while construction is genuinely in flight, which is the window the old
+// implementation got wrong.
+@Test func concurrentFirstResolveConstructsExactlyOnce() async throws {
+    final class Results: @unchecked Sendable {
         private let lock = NSLock()
         private var items: [SendableA] = []
 
@@ -397,52 +447,101 @@ final class Counter: @unchecked Sendable {
 
     let container = Container(defaultScope: .container)
     let factoryCalls = Counter()
-    let firstFactoryEntered = DispatchSemaphore(value: 0)
-    let winnerCached = DispatchSemaphore(value: 0)
-    let initRecords = InitRecords()
+    let initRuns = Counter()
+    let winnerParked = DispatchSemaphore(value: 0)
+    let releaseWinner = DispatchSemaphore(value: 0)
 
     container.register(SendableA.self) { _ in
         if factoryCalls.incrementAndGet() == 1 {
-            // Park the losing thread inside its factory until the winner has
-            // cached an instance and run its initCompleted.
-            firstFactoryEntered.signal()
-            winnerCached.wait()
+            winnerParked.signal()
+            releaseWinner.wait()
         }
         return SendableA()
-    }.initCompleted { _, a in
-        initRecords.add(a)
+    }.initCompleted { _, _ in
+        _ = initRuns.incrementAndGet()
     }
 
-    let loserBox = Box()
-    let loserDone = DispatchSemaphore(value: 0)
+    let results = Results()
+    let group = DispatchGroup()
+    for _ in 0..<8 {
+        group.enter()
+        DispatchQueue.global().async {
+            if let a = container.resolve(SendableA.self) {
+                results.add(a)
+            }
+            group.leave()
+        }
+    }
+
+    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+        DispatchQueue.global().async {
+            winnerParked.wait()
+            continuation.resume()
+        }
+    }
+    releaseWinner.signal()
+
+    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+        DispatchQueue.global().async {
+            group.wait()
+            continuation.resume()
+        }
+    }
+
+    let all = results.all
+    #expect(all.count == 8)
+    let first = all.first
+    #expect(all.allSatisfy { $0 === first })
+    #expect(factoryCalls.current == 1)
+    #expect(initRuns.current == 1)
+}
+
+// A waiter must re-read the cache rather than assume the winner published. When
+// the registration is replaced while its factory is running, the instance that
+// factory built is returned to its own caller but never cached — so the next
+// resolve builds from the registration that is actually installed.
+@Test func instanceIsNotCachedWhenRegistrationChangesMidConstruction() async throws {
+    let container = Container(defaultScope: .container)
+    let factoryEntered = DispatchSemaphore(value: 0)
+    let releaseFactory = DispatchSemaphore(value: 0)
+
+    container.register(String.self) { _ in
+        factoryEntered.signal()
+        releaseFactory.wait()
+        return "first"
+    }
+
+    let firstResult = Counter()
+    let firstDone = DispatchSemaphore(value: 0)
+    nonisolated(unsafe) var observed: String?
     DispatchQueue.global().async {
-        loserBox.set(container.resolve(SendableA.self))
-        loserDone.signal()
+        observed = container.resolve(String.self)
+        _ = firstResult.incrementAndGet()
+        firstDone.signal()
     }
 
     await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
         DispatchQueue.global().async {
-            firstFactoryEntered.wait()
+            factoryEntered.wait()
             continuation.resume()
         }
     }
 
-    let winner = container.resolve(SendableA.self)
-    winnerCached.signal()
+    // Land a new registration while the first factory is still running.
+    container.register(String.self) { _ in "second" }
+    releaseFactory.signal()
 
     await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
         DispatchQueue.global().async {
-            loserDone.wait()
+            firstDone.wait()
             continuation.resume()
         }
     }
 
-    let loser = loserBox.get
-    #expect(winner != nil)
-    #expect(loser === winner)
-    #expect(factoryCalls.current == 2)
-    #expect(initRecords.all.count == 1)
-    #expect(initRecords.all.first === winner)
+    // Its own caller still gets what it asked for...
+    #expect(observed == "first")
+    // ...but it was never cached, so the live registration wins from here on.
+    #expect(container.resolve(String.self) == "second")
 }
 
 @Test func concurrentTransientResolvesReturnDistinctInstances() async throws {
@@ -562,19 +661,21 @@ final class Counter: @unchecked Sendable {
     }
 
     let container = Container(defaultScope: .container)
-    container.registerMainActor(SendableA.self) { _ in SendableA() }
+    let factoryCalls = Counter()
+    container.registerMainActor(SendableA.self) { _ in
+        _ = factoryCalls.incrementAndGet()
+        return SendableA()
+    }
 
+    // `resolveAsync`, not `resolve`: these tasks are not on the main actor, and
+    // the synchronous path now refuses rather than hopping.
     let results = Results()
-    // concurrentPerform must run off the main thread: the main-actor factory
-    // hops via DispatchQueue.main.sync and would deadlock otherwise.
-    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-        DispatchQueue.global().async {
-            DispatchQueue.concurrentPerform(iterations: 4) { _ in
-                if let a = container.resolve(SendableA.self) {
-                    results.add(a)
-                }
-            }
-            continuation.resume()
+    await withTaskGroup(of: SendableA?.self) { group in
+        for _ in 0..<4 {
+            group.addTask { await container.resolveAsync(SendableA.self) }
+        }
+        for await a in group {
+            if let a { results.add(a) }
         }
     }
 
@@ -582,6 +683,7 @@ final class Counter: @unchecked Sendable {
     #expect(all.count == 4)
     let first = all.first
     #expect(all.allSatisfy { $0 === first })
+    #expect(factoryCalls.current == 1)
 }
 
 // MARK: - initCompleted
