@@ -72,8 +72,6 @@ let factory = await container.resolveAsync(ViewModelFactory.self)
 
 `resolveAsync` hops to the main actor with `await` only when the registration needs it and nothing has constructed the service yet; an already-cached service returns without suspending. It works for any `Sendable` service, whichever way it was registered.
 
-> **Why it traps rather than hopping.** Before 0.1.0 the container hopped for you via `DispatchQueue.main.sync`. That deadlocks whenever the main thread is already waiting on the calling thread — and because the hop only ran on a *cache miss*, the deadlock stopped reproducing as soon as anything warmed the type. A hang that vanishes on the second launch and never reproduces under a debugger is worse than a crash, so the synchronous path now refuses.
->
 > The trap covers a cold resolve only. A *warm* off-main `resolve` still hands a main-actor service to a background thread, and the container cannot see that — the caller's isolation is the caller's to get right.
 
 ### Teardown
@@ -91,8 +89,6 @@ container.removeAll()                                        // remove everythin
 - **A `.container`-scoped service is constructed exactly once**, however many threads race its first resolve. The container's lock is still never held while your code (factories, `initCompleted` callbacks) runs — construction is serialized per service key instead, so a slow factory for one type never blocks resolving another. `.transient` registrations are deliberately not serialized: constructing per resolve is what transient means.
 - If a registration is replaced (`register`, `unregister`, `removeAll`) while its factory is running, the instance that factory built is still returned to its own caller but is **not** cached — it cannot outlive the registration it came from.
 - Circular dependencies (A → B → A) are detected during resolution and trap with a message describing the cycle.
-
-> Before 0.1.0 a racing first resolve could run the factory more than once, keeping one instance and discarding the rest — so callers were told to keep factories free of one-shot side effects. For a service holding a keychain handle, a CloudKit container or a crypto key, building a second one and throwing it away is a correctness bug rather than a wasted allocation. Factories no longer need to be idempotent.
 
 ## License
 

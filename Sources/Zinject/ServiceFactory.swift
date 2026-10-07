@@ -64,17 +64,6 @@ final class MainActorServiceFactoryImpl<Service>: @unchecked Sendable, ServiceFa
     }
 
     func create(resolver: Resolver) -> Service {
-        // This used to hop via `DispatchQueue.main.sync`, and that was a bug.
-        //
-        // A synchronous hop deadlocks whenever the main thread is already
-        // waiting on the caller — and because it only runs on a cache miss, it
-        // stops reproducing the moment anything warms the type. A hang that
-        // vanishes on the second launch and never reproduces under a debugger
-        // you have already used the app in is worse than a crash, so this
-        // refuses instead.
-        //
-        // `Container.resolveAsync(_:)` is the supported way in from a
-        // background context: it hops with `await`, which cannot deadlock.
         guard Thread.isMainThread else {
             preconditionFailure("""
                 Zinject: \(Service.self) was registered with `registerMainActor` and \
