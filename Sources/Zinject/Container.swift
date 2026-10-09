@@ -486,6 +486,14 @@ public final class Container: @unchecked Sendable, Resolver {
     /// storage is live for exactly the duration of the read section, and this
     /// is only ever called from inside one.
     ///
+    /// The underscore on `_withUnsafeGuaranteedRef` means the standard library
+    /// makes no source-stability promise for it. That is an accepted risk, and
+    /// its shape is the reason accepting it is reasonable: a toolchain that
+    /// removes or reshapes the primitive fails this build loudly, in this one
+    /// function, rather than miscompiling quietly — and there is no stable
+    /// spelling of what it does. Keep it that way; nothing else in the module
+    /// may name an underscored API.
+    ///
     /// Reading the reference as a single word is what ``isBareReference(_:)``
     /// checks: a class-bound existential also satisfies `AnyObject` but carries
     /// witness tables after the reference, and loading one word of it would
