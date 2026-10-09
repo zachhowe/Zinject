@@ -84,6 +84,7 @@ final class UnfairLock: Locking {
     @usableFromInline
     let mutex = NSLock()
 
+    @usableFromInline
     init() {}
 
     @inline(__always) func lock() { mutex.lock() }
