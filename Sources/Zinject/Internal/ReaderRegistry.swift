@@ -152,7 +152,20 @@ let slotKey: pthread_key_t = {
     var key = pthread_key_t()
     let status = pthread_key_create(&key) { value in
         // Runs on thread exit. The pointer is the biased ID, not an allocation,
-        // so there is nothing to free — just return the slot to the pool.
+        // so there is nothing to free — clear the slot, then return the ID to
+        // the pool.
+        //
+        // Clearing first is what keeps this destructor single-shot. POSIX
+        // permits a key's destructor to be invoked again while the value stays
+        // non-NULL, and a second invocation would recycle one ID twice: two
+        // threads would then share a counter slot, which their combined
+        // arrivals and departures happen to survive — but the drain's proof
+        // that "the counter refusing to clear belongs to the calling thread"
+        // would no longer hold, and one thread could trap a reentrant write on
+        // the other's legitimate read. Darwin, glibc, and musl all zero the
+        // slot before calling, so this changes nothing on them; it only puts
+        // the guarantee in our hands instead of the pthread implementation's.
+        pthread_setspecific(slotKey, nil)
         ReaderRegistry.recycleID(encoded: UInt(bitPattern: value))
     }
     precondition(status == 0, "Zinject: pthread_key_create failed with status \(status)")

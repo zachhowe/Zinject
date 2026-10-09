@@ -79,6 +79,13 @@ private let stackKey: pthread_key_t = {
     var key = pthread_key_t()
     let status = pthread_key_create(&key) { value in
         // Balances the `passRetained` in `ResolutionStack.current`.
+        //
+        // Clearing the slot first is what keeps this destructor single-shot:
+        // POSIX permits a key's destructor to be re-invoked while the value
+        // stays non-NULL, and a second release here would over-release an
+        // already-freed stack. Darwin, glibc, and musl all zero the slot
+        // before calling; this pins the behavior rather than relying on it.
+        pthread_setspecific(stackKey, nil)
         Unmanaged<ResolutionStack>.fromOpaque(value).release()
     }
     precondition(status == 0, "Zinject: pthread_key_create failed with status \(status)")
