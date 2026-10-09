@@ -42,6 +42,11 @@ enum ReaderRegistry {
     static let exhaustedMarker = UInt(Int.max)
 
     private static let allocationLock = NSLock()
+    /// Free reader IDs, most recently freed last.
+    ///
+    /// `nonisolated(unsafe)` because the protection it relies on is
+    /// `allocationLock`, not the type system: every read and write of this
+    /// array happens while holding that lock.
     private static nonisolated(unsafe) var availableIDs: [Int] = Array((0 ..< capacity).reversed())
 
     /// Bit *k* is set for as long as some live thread holds reader ID *k*.
