@@ -84,6 +84,9 @@ public enum ConcurrencyStrategy: Sendable, CaseIterable, Hashable {
 }
 
 extension ConcurrencyStrategy: CustomStringConvertible {
+    /// The case name, verbatim — so a log line naming the strategy matches the
+    /// spelling in source, and so the unrecognized-`ZINJECT_CONCURRENCY` warning
+    /// can list the accepted values without a second table of names.
     public var description: String {
         switch self {
         case .leftRight: return "leftRight"

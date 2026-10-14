@@ -47,6 +47,30 @@ private final class ConstructionToken {
     }
 }
 
+/// A dependency injection container: register factories by type, resolve
+/// instances, and let the container construct and cache them.
+///
+/// ```swift
+/// let container = Container()
+/// container.register(Greeter.self) { _ in ConsoleGreeter() }
+/// let greeter = container.resolveRequired(Greeter.self)
+/// ```
+///
+/// Everything mutable the container owns — its registrations and any cached
+/// instances — lives in one value behind whichever ``ConcurrencyStrategy`` it
+/// was created with, so a resolve is wait-free under ``leftRight`` and one
+/// lock acquisition under the mutex strategies. A `.container`-scoped service
+/// is constructed exactly once however many threads race its first resolve,
+/// serialized by a per-key gate rather than by the state itself, so a slow
+/// factory for one type never blocks resolving another.
+///
+/// A container may also be given a `parent`: resolution is child-first, and a
+/// type with no registration here falls through to the parent, transitively
+/// through a whole chain. See ``init(parent:defaultScope:concurrency:)``.
+///
+/// The type is `Sendable` and its methods are safe to call from any thread,
+/// with the one documented exception of the body contract on
+/// ``withResolvedRequired(_:_:)``.
 public final class Container: @unchecked Sendable, Resolver {
     /// Everything the container mutates, in one value so that a single
     /// Left-Right cell covers it.
@@ -254,6 +278,16 @@ public final class Container: @unchecked Sendable, Resolver {
         }
     }
 
+    /// Registers a factory for `type`, returning an entry for fluent
+    /// configuration (``Scope``, `initCompleted`). Re-registering a type
+    /// replaces the registration and evicts any instance cached under the one
+    /// it replaces, so the next resolve constructs from the new factory.
+    ///
+    /// The factory runs on the thread that asked for the resolve, with no
+    /// container lock held — it may resolve further services, including this
+    /// one's own dependencies, and cycles are detected and reported. For a
+    /// factory that must run on the main actor, see
+    /// ``registerMainActor(_:factory:)``.
     @discardableResult
     public func register<Service>(
         _ type: Service.Type,
@@ -283,6 +317,11 @@ public final class Container: @unchecked Sendable, Resolver {
     }
 
     /// Removes the registration and any cached instance for the given type.
+    ///
+    /// A resolve already in flight when this lands returns the instance it
+    /// constructed but does not cache it. Registrations in a ``parent`` are
+    /// untouched — removing from a child only stops the child from supplying
+    /// the type itself, so resolves then fall through to the parent.
     public func unregister<Service>(_ type: Service.Type) {
         assertNoOpenSection("unregistered", type)
         let serviceKey = ServiceKey(resolvingType: type)
@@ -291,7 +330,10 @@ public final class Container: @unchecked Sendable, Resolver {
         }
     }
 
-    /// Removes all registrations and cached instances.
+    /// Removes all registrations and cached instances in this container.
+    ///
+    /// A ``parent`` is untouched, so resolves against this container fall
+    /// through to it afterward.
     public func removeAll() {
         assertNoOpenSection("every registration was removed")
         writeState { current in
