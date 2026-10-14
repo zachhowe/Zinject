@@ -97,6 +97,19 @@ public final class Container: @unchecked Sendable, Resolver {
     private let constructionLock = NSLock()
     private var constructing: [ServiceKey: ConstructionToken] = [:]
 
+    /// The container this one falls back to when it has no registration for a
+    /// type, if any.
+    ///
+    /// Set at init and immutable afterwards, so reading it never needs a cell
+    /// and the hierarchy itself is read-mostly like everything else. A child
+    /// keeps its parent alive: the child cannot resolve anything its parent
+    /// registers if the parent is gone, so a weak parent would turn a missing
+    /// registration into a silent nil. As with the rest of the module, cycles
+    /// are a programmer error — making a container its own ancestor is a
+    /// reference cycle, and resolving through one recurses until the stack
+    /// gives out.
+    public let parent: Container?
+
     public let defaultScope: Scope
 
     /// How this container synchronizes its state.
@@ -118,10 +131,37 @@ public final class Container: @unchecked Sendable, Resolver {
     ///     ``defaultConcurrency``, which reads `ZINJECT_CONCURRENCY` — so an
     ///     existing `Container()` call site follows a process-wide override
     ///     without being edited. See ``ConcurrencyStrategy`` for the trade-offs.
-    public init(
+    public convenience init(
         defaultScope: Scope = .container,
         concurrency: ConcurrencyStrategy = Container.defaultConcurrency
     ) {
+        self.init(parent: nil, defaultScope: defaultScope, concurrency: concurrency)
+    }
+
+    /// Creates a container that falls back to `parent` when it has no
+    /// registration for a type.
+    ///
+    /// Resolution is child-first: the child's own registrations and cache are
+    /// consulted, and only a type with no registration here is resolved from
+    /// the parent (which applies the same rule against *its* parent, so a
+    /// chain works transitively). A type registered in both is resolved — and
+    /// cached — from the child. Since the lookup is by registration, not by
+    /// instance, a `.container`-scoped service registered in the parent is
+    /// cached *in the parent* and shared by every child that falls back to it,
+    /// while a `.transient` builds fresh on each resolve from anywhere.
+    ///
+    /// - Parameters:
+    ///   - parent: The container to resolve from when this one has no
+    ///     registration for a type.
+    ///   - defaultScope: The scope used by registrations that do not set one.
+    ///   - concurrency: How this container synchronizes its state. See
+    ///     ``init(defaultScope:concurrency:)``.
+    public init(
+        parent: Container?,
+        defaultScope: Scope = .container,
+        concurrency: ConcurrencyStrategy = Container.defaultConcurrency
+    ) {
+        self.parent = parent
         self.defaultScope = defaultScope
         self.concurrency = concurrency
         switch concurrency {
@@ -261,6 +301,12 @@ public final class Container: @unchecked Sendable, Resolver {
 
     /// Resolves a service, or returns nil if the type was never registered.
     ///
+    /// When this container has a ``parent`` and no registration for the type,
+    /// the resolve falls through to the parent, which applies the same rule
+    /// against its own parent. Everything else — scoping, caching, the
+    /// construction gate — happens in whichever container the registration was
+    /// found in.
+    ///
     /// A `.container`-scoped service is constructed **exactly once**, however
     /// many threads race its first resolve. No lock and no read section is held
     /// while user code (factories, `initCompleted` callbacks) runs — the
@@ -317,6 +363,12 @@ public final class Container: @unchecked Sendable, Resolver {
 
         guard let serviceFactory = registered else {
             countUnregisteredLookup()
+            // No registration here. The parent is consulted before giving up;
+            // it runs its own `resolve`, so its cache and construction gate
+            // apply as if the type had been asked of it directly.
+            if let parent {
+                return parent.resolve(type)
+            }
             return nil
         }
 
@@ -355,6 +407,11 @@ public final class Container: @unchecked Sendable, Resolver {
 
         guard let serviceFactory = registered else {
             countUnregisteredLookup()
+            // Same parent fallback as ``resolve(_:)``: registration, not
+            // instance, decides where a resolve lands.
+            if let parent {
+                return parent.resolve(type)
+            }
             return nil
         }
 
@@ -398,6 +455,12 @@ public final class Container: @unchecked Sendable, Resolver {
     ///   from one traps only where the checks are compiled in — `DEBUG` or
     ///   `-DZINJECT_BORROW_CHECKS` — because that check would otherwise cost
     ///   half of a cached resolve; see ``SectionGuard``.
+    ///
+    ///   A ``parent`` changes nothing about the contract: a borrow can only
+    ///   lend an instance this container itself has cached. A type registered
+    ///   only in the parent takes the copying path — ``resolve(_:)``, which
+    ///   falls back to the parent — and so retains, which is fine: the parent
+    ///   instance is not this container's to lend under its read section.
     ///
     /// Restricted to classes, which costs nothing: a struct has no reference
     /// count, so it never had the contention this exists to remove.
@@ -448,9 +511,18 @@ public final class Container: @unchecked Sendable, Resolver {
             return staged.move(as: R.self)
         }
 
-        guard let serviceFactory = registered,
-              let instance: Service = construct(serviceKey, from: serviceFactory)
-        else {
+        guard let serviceFactory = registered else {
+            // No registration here at all — not even one still being built.
+            // The copying path goes through `resolve`, which falls back to
+            // the parent; the borrow cannot lend an instance this container
+            // does not own, so a parent-only registration retains, by design.
+            if parent != nil {
+                return try withResolvedRequiredCopying(type, body)
+            }
+            preconditionFailure("Zinject: failed to resolve required service \(type)")
+        }
+
+        guard let instance: Service = construct(serviceKey, from: serviceFactory) else {
             preconditionFailure("Zinject: failed to resolve required service \(type)")
         }
 
@@ -521,7 +593,8 @@ public final class Container: @unchecked Sendable, Resolver {
     }
 
     /// The path for shapes the borrow cannot serve: a result too large to stage,
-    /// or a service that is not one bare reference.
+    /// a service that is not one bare reference, or a registration that lives
+    /// in a ``parent`` rather than here.
     ///
     /// It resolves normally and so does retain — correctness first. Out of line
     /// because its `Service?` is what the fast path goes to some trouble to
@@ -570,10 +643,10 @@ public final class Container: @unchecked Sendable, Resolver {
     /// the whole decision here means the async caller only branches on the
     /// answer.
     private func needsMainActor(_ serviceKey: ServiceKey) -> Bool {
-        readState { current in
+        let own = readState { current -> Bool? in
             guard let slot = current.pointee.table.slot(for: serviceKey) else {
-                // Unregistered. Resolving returns nil wherever it runs.
-                return false
+                // Unregistered here: the answer belongs to the parent, if any.
+                return nil
             }
             // An instance already exists, so no factory has to run.
             guard current.pointee.table.instance(at: slot) == nil else {
@@ -581,6 +654,11 @@ public final class Container: @unchecked Sendable, Resolver {
             }
             return current.pointee.table.factory(at: slot)?.requiresMainActor ?? false
         }
+        if let own { return own }
+        if let parent {
+            return parent.needsMainActor(serviceKey)
+        }
+        return false
     }
 
     /// Produces the instance for a resolve that did not find one cached,
@@ -630,6 +708,12 @@ public final class Container: @unchecked Sendable, Resolver {
                     continue
                 case .unregistered:
                     countUnregisteredLookup()
+                    // The registration was replaced or removed while this
+                    // thread waited. With a parent, "removed" here means the
+                    // resolve lands there rather than coming back nil.
+                    if let parent {
+                        return parent.resolve(Service.self)
+                    }
                     return nil
                 }
             }
