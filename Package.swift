@@ -12,15 +12,9 @@ let package = Package(
         .watchOS(.v6),
     ],
     products: [
-        // Dynamic, deliberately: PRUF links Zinject from four frameworks plus the app and
-        // the test bundle. A static product gets hoisted into a hash-named PackageProduct
-        // framework whose symbols the test bundle cannot bind against, and N static copies
-        // would give N distinct Container types in one process — a parent chain handed
-        // across module boundaries needs ONE shared image. A dynamic product gives every
-        // consumer the same boring @rpath linkage the app already uses for OpenSSL.
+        // Products define the executables and libraries a package produces, making them visible to other packages.
         .library(
             name: "Zinject",
-            type: .dynamic,
             targets: ["Zinject"]),
     ],
     dependencies: [
